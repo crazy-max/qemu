@@ -546,6 +546,45 @@ static void usage(int exitcode)
     exit(exitcode);
 }
 
+/*
+ * path_lookup searches for an executable filename in the directories named by the PATH environment variable.
+ * Returns a copy of filename if it is an absolute path or could not find a match.
+ * Caller is responsible to free returned string.
+ * Adapted from musl's execvp implementation.
+ */
+static char *path_lookup(char *filename) {
+    const char *p, *z, *path = getenv("PATH");
+    size_t l, k;
+    struct stat buf;
+
+    /* if PATH is not set or filename is absolute path return filename */
+    if (!path || !filename || filename[0] == '/')
+        return strndup(filename, NAME_MAX+1);
+
+    k = strnlen(filename, NAME_MAX+1);
+    if (k > NAME_MAX) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
+    l = strnlen(path, PATH_MAX-1)+1;
+
+    for (p = path; ; p = z) {
+        char *b = calloc(l+k+1, sizeof(char));
+        z = strchrnul(p, ':');
+        if (z-p >= l) {
+            if (!*z++) break;
+            continue;
+        }
+        memcpy(b, p, z-p);
+        b[z-p] = '/';
+        memcpy(b+(z-p)+(z>p), filename, k+1);
+        if (!stat(b, &buf) && !(buf.st_mode & S_IFDIR) && (buf.st_mode & (S_IXUSR|S_IXGRP|S_IXOTH)))
+            return b;
+        if (!*z++) break;
+    }
+    return strndup(filename, NAME_MAX+1);
+}
+
 static int parse_args(int argc, char **argv)
 {
     const char *r;
@@ -611,7 +650,11 @@ static int parse_args(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    exec_path = argv[optind];
+    /* not freeing exec_path as it is needed for the lifetime of the process */
+    if (!(exec_path = path_lookup(argv[optind]))) {
+        (void) fprintf(stderr, "qemu: could not find user program %s: %s\n", exec_path, strerror(errno));
+        exit(EXIT_FAILURE);
+    }
 
     return optind;
 }
