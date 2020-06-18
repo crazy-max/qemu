@@ -3145,10 +3145,10 @@ uint32_t get_elf_eflags(int fd)
         return 0;
     }
     ret = read(fd, &ehdr, sizeof(ehdr));
+    offset = lseek(fd, offset, SEEK_SET); /* reset seek regardless of error */
     if (ret < sizeof(ehdr)) {
         return 0;
     }
-    offset = lseek(fd, offset, SEEK_SET);
     if (offset == (off_t) -1) {
         return 0;
     }
