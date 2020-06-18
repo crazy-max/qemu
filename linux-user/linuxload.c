@@ -128,7 +128,7 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
              struct target_pt_regs * regs, struct image_info *infop,
              struct linux_binprm *bprm)
 {
-    int retval;
+    int retval, depth;
 
     bprm->fd = fdexec;
     bprm->filename = (char *)filename;
@@ -137,24 +137,33 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
     bprm->envc = count(envp);
     bprm->envp = envp;
 
-    retval = prepare_binprm(bprm);
-
-    if(retval>=0) {
-        if (bprm->buf[0] == 0x7f
-                && bprm->buf[1] == 'E'
-                && bprm->buf[2] == 'L'
-                && bprm->buf[3] == 'F') {
-            retval = load_elf_binary(bprm, infop);
-#if defined(TARGET_HAS_BFLT)
-        } else if (bprm->buf[0] == 'b'
-                && bprm->buf[1] == 'F'
-                && bprm->buf[2] == 'L'
-                && bprm->buf[3] == 'T') {
-            retval = load_flt_binary(bprm, infop);
-#endif
-        } else {
-            return -ENOEXEC;
+    for (depth = 0; ; depth++) {
+        if (depth > 5) {
+            return -ELOOP;
         }
+        retval = prepare_binprm(bprm);
+        if(retval>=0) {
+            if (bprm->buf[0] == 0x7f
+                    && bprm->buf[1] == 'E'
+                    && bprm->buf[2] == 'L'
+                    && bprm->buf[3] == 'F') {
+                retval = load_elf_binary(bprm, infop);
+#if defined(TARGET_HAS_BFLT)
+            } else if (bprm->buf[0] == 'b'
+                    && bprm->buf[1] == 'F'
+                    && bprm->buf[2] == 'L'
+                    && bprm->buf[3] == 'T') {
+                retval = load_flt_binary(bprm, infop);
+#endif
+            } else if (bprm->buf[0] == '#'
+                    && bprm->buf[1] == '!') {
+                retval = load_script(bprm);
+                if (retval >= 0) continue;
+            } else {
+                return -ENOEXEC;
+            }
+        }
+        break;
     }
 
     if(retval>=0) {
@@ -164,4 +173,100 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
     }
 
     return(retval);
+}
+
+static inline bool spacetab(char c) { return c == ' ' || c == '\t'; }
+static inline const char *next_non_spacetab(const char *first, const char *last)
+{
+    for (; first <= last; first++)
+        if (!spacetab(*first))
+            return first;
+    return NULL;
+}
+static inline const char *next_terminator(const char *first, const char *last)
+{
+    for (; first <= last; first++)
+        if (spacetab(*first) || !*first)
+            return first;
+    return NULL;
+}
+
+/*
+ * Reads the interpreter (shebang #!) line and modifies bprm object accordingly
+ * This is a modified version of Linux's load_script function.
+*/
+int load_script(struct linux_binprm *bprm)
+{
+    const char *i_name, *i_sep, *i_arg, *i_end, *buf_end;
+    int execfd, i, argc_delta;
+
+    buf_end = bprm->buf + sizeof(bprm->buf) - 1;
+    i_end = (const char*)memchr(bprm->buf, '\n', sizeof(bprm->buf));
+    if (!i_end) {
+        i_end = next_non_spacetab(bprm->buf + 2, buf_end);
+        if (!i_end) {
+            perror("script_prepare_binprm: no interpreter name found");
+            return -ENOEXEC; /* Entire buf is spaces/tabs */
+        }
+        /*
+         * If there is no later space/tab/NUL we must assume the
+         * interpreter path is truncated.
+         */
+        if (!next_terminator(i_end, buf_end)) {
+            perror("script_prepare_binprm: truncated interpreter path");
+            return -ENOEXEC;
+        }
+        i_end = buf_end;
+    }
+    /* Trim any trailing spaces/tabs from i_end */
+    while (spacetab(i_end[-1]))
+        i_end--;
+    *((char *)i_end) = '\0';
+    /* Skip over leading spaces/tabs */
+    i_name = next_non_spacetab(bprm->buf+2, i_end);
+    if (!i_name || (i_name == i_end)) {
+        perror("script_prepare_binprm: no interpreter name found");
+        return -ENOEXEC; /* No interpreter name found */
+    }
+
+    /* Is there an optional argument? */
+    i_arg = NULL;
+    i_sep = next_terminator(i_name, i_end);
+    if (i_sep && (*i_sep != '\0')) {
+        i_arg = next_non_spacetab(i_sep, i_end);
+        *((char *)i_sep) = '\0';
+    }
+
+    /*
+     * OK, we've parsed out the interpreter name and
+     * (optional) argument.
+     * Splice in (1) the interpreter's name for argv[0]
+     *           (2) (optional) argument to interpreter
+     *           (3) filename of shell script (replace argv[0])
+     *           (4) user arguments (argv[1:])
+     */
+
+    execfd = open(i_name, O_RDONLY);
+    if (execfd < 0) {
+        perror("script_prepare_binprm: could not open script");
+        return -ENOEXEC; /* Could not open interpreter */
+    }
+
+    argc_delta = 1 /* extra filename */ + (i_arg ? 1 : 0);
+    bprm->argc += argc_delta;
+    bprm->argv = realloc(bprm->argv, sizeof(char*) * (bprm->argc + 1));
+
+    /* shift argv by argc_delta */
+    for (i = bprm->argc; i >= argc_delta; i--)
+        bprm->argv[i] = bprm->argv[i-argc_delta];
+
+    bprm->argv[0] = (char *)strdup(i_name);
+    if (i_arg)
+        bprm->argv[1] = (char *)strdup(i_arg);
+
+    bprm->fd = execfd; /* not closing fd as it is needed for the duration of the program */
+    bprm->filename = (char *)strdup(i_name); /* replace filename with script interpreter */
+    /* envc and envp are kept unchanged */
+
+    return 0;
 }
