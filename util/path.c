@@ -68,3 +68,33 @@ const char *path(const char *name)
     qemu_mutex_unlock(&lock);
     return ret;
 }
+
+/* Prepends working directory if path is relative.
+ * If path is absolute, it is returned as-is without any allocation.
+ * Otherwise, caller is responsible to free returned path.
+ * Returns NULL and sets errno upon error.
+ * Note: realpath is not called to let the kernel do the rest of the resolution.
+ */
+const char *prepend_workdir_if_relative(const char *path)
+{
+    char buf[PATH_MAX];
+    char *p;
+    int i, j, k;
+
+    if (!path || path[0] == '/') return path;
+
+    if (!getcwd(buf, PATH_MAX)) return NULL;
+    i = strlen(buf);
+    j = strlen(path);
+    k = i + 1 + j + 1; /* workdir + '/' + path + '\0' */
+    if (i + j > PATH_MAX) {
+        errno = ERANGE;
+        return NULL;
+    }
+    if (!(p = malloc(k * sizeof(char*)))) return NULL;
+
+    if (!strncat(p, buf, i)) return NULL;
+    if (!strncat(p, "/", 1)) return NULL;
+    if (!strncat(p, path, j)) return NULL;
+    return p;
+}

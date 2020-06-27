@@ -8406,12 +8406,17 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
              * 		execve(pathname, [argv0, argv1], envp)
              * on the host, becomes:
              * 		execve("/proc/self/exe", [qemu_progname, "-0", argv0, pathname, argv1], envp)
-             * where qemu_progname is the error message prefix for qemu
+             * where qemu_progname is the error message prefix for qemu.
+             * Note: if pathname is relative, it will be prepended with the current working directory.
             */
             argp[0] = (char*)error_get_progname();
             argp[1] = (char*)"-0";
             argp[2] = (char*)lock_user_string(addr);
-            argp[3] = p;
+            argp[3] = (char*)prepend_workdir_if_relative(p);
+            if (!argp[3]) {
+                ret = -host_to_target_errno(errno);
+                goto execve_end;
+            }
 
             /* copy guest argv1 onwards to host argv4 onwards */
             for (gp = guest_argp + 1*sizeof(abi_ulong), q = argp + 4; gp;
