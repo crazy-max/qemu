@@ -8498,10 +8498,42 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 envc++;
             }
 
-            argp = g_new0(char *, argc + 1);
+            argp = g_new0(char *, argc + 4);
             envp = g_new0(char *, envc + 1);
 
-            for (gp = guest_argp, q = argp; gp;
+            if (!(p = lock_user_string(arg1)))
+                goto execve_efault;
+
+            /* if pathname is /proc/self/exe then retrieve the path passed to qemu via command line */
+            if (is_proc_myself(p, "exe")) {
+                CPUState *cpu = env_cpu((CPUArchState *)cpu_env);
+                TaskState *ts = cpu->opaque;
+                p = ts->bprm->filename;
+            }
+
+            /* retrieve guest argv0 */
+            if (get_user_ual(addr, guest_argp))
+                goto execve_efault;
+
+            /*
+             * From the guest, the call
+             * 		execve(pathname, [argv0, argv1], envp)
+             * on the host, becomes:
+             * 		execve("/proc/self/exe", [qemu_progname, "-0", argv0, pathname, argv1], envp)
+             * where qemu_progname is the error message prefix for qemu.
+             * Note: if pathname is relative, it will be prepended with the current working directory.
+            */
+            argp[0] = (char*)error_get_progname();
+            argp[1] = (char*)"-0";
+            argp[2] = (char*)lock_user_string(addr);
+            argp[3] = (char*)prepend_workdir_if_relative(p);
+            if (!argp[3]) {
+                ret = -host_to_target_errno(errno);
+                goto execve_end;
+            }
+
+            /* copy guest argv1 onwards to host argv4 onwards */
+            for (gp = guest_argp + 1*sizeof(abi_ulong), q = argp + 4; gp;
                   gp += sizeof(abi_ulong), q++) {
                 if (get_user_ual(addr, gp))
                     goto execve_efault;
@@ -8525,8 +8557,6 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
             *q = NULL;
 
-            if (!(p = lock_user_string(arg1)))
-                goto execve_efault;
             /* Although execve() is not an interruptible syscall it is
              * a special case where we must use the safe_syscall wrapper:
              * if we allow a signal to happen before we make the host
@@ -8537,7 +8567,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
              * before the execve completes and makes it the other
              * program's problem.
              */
-            ret = get_errno(safe_execve(p, argp, envp));
+            ret = get_errno(safe_execve("/proc/self/exe", argp, envp));
             unlock_user(p, arg1, 0);
 
             goto execve_end;
