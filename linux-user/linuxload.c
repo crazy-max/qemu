@@ -244,6 +244,8 @@ int load_script(struct linux_binprm *bprm)
      *           (4) user arguments (argv[1:])
      */
 
+    bprm->argv[0] = bprm->filename;
+
     execfd = open(i_name, O_RDONLY);
     if (execfd < 0) {
         perror("script_prepare_binprm: could not open script");
