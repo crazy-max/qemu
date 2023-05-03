@@ -56,4 +56,6 @@ abi_long memcpy_to_target(abi_ulong dest, const void *src,
 
 extern unsigned long guest_stack_size;
 
+int load_script(struct linux_binprm *bprm);
+
 #endif /* LINUX_USER_LOADER_H */
