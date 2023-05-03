@@ -659,8 +659,7 @@ safe_syscall4(pid_t, wait4, pid_t, pid, int *, status, int, options, \
 #endif
 safe_syscall5(int, waitid, idtype_t, idtype, id_t, id, siginfo_t *, infop, \
               int, options, struct rusage *, rusage)
-safe_syscall5(int, execveat, int, dirfd, const char *, filename,
-              char **, argv, char **, envp, int, flags)
+safe_syscall3(int, execve, const char *, filename, char **, argv, char **, envp)
 #if defined(TARGET_NR_select) || defined(TARGET_NR__newselect) || \
     defined(TARGET_NR_pselect6) || defined(TARGET_NR_pselect6_time64)
 safe_syscall6(int, pselect6, int, nfds, fd_set *, readfds, fd_set *, writefds, \
@@ -8422,10 +8421,37 @@ static int do_execveat(CPUArchState *cpu_env, int dirfd,
         envc++;
     }
 
-    argp = g_new0(char *, argc + 1);
+    argp = g_new0(char *, argc + 4);
     envp = g_new0(char *, envc + 1);
 
-    for (gp = guest_argp, q = argp; gp; gp += sizeof(abi_ulong), q++) {
+    if (!(p = lock_user_string(pathname)))
+        goto execve_efault;
+
+    /* if pathname is /proc/self/exe then retrieve the path passed to qemu via command line */
+    if (is_proc_myself(p, "exe")) {
+        CPUState *cpu = env_cpu((CPUArchState *)cpu_env);
+        TaskState *ts = cpu->opaque;
+        p = ts->bprm->filename;
+    }
+
+    /* retrieve guest argv0 */
+    if (get_user_ual(addr, guest_argp))
+        goto execve_efault;
+
+    /*
+     * From the guest, the call
+     * 		execve(pathname, [argv0, argv1], envp)
+     * on the host, becomes:
+     * 		execve("/proc/self/exe", [qemu_progname, "-0", argv0, pathname, argv1], envp)
+     * where qemu_progname is the error message prefix for qemu
+    */
+    argp[0] = (char*)error_get_progname();
+    argp[1] = (char*)"-0";
+    argp[2] = (char*)lock_user_string(addr);
+    argp[3] = p;
+
+    /* copy guest argv1 onwards to host argv4 onwards */
+    for (gp = guest_argp + 1*sizeof(abi_ulong), q = argp + 4; gp; gp += sizeof(abi_ulong), q++) {
         if (get_user_ual(addr, gp)) {
             goto execve_efault;
         }
@@ -8464,17 +8490,7 @@ static int do_execveat(CPUArchState *cpu_env, int dirfd,
      * before the execve completes and makes it the other
      * program's problem.
      */
-    p = lock_user_string(pathname);
-    if (!p) {
-        goto execve_efault;
-    }
-
-    if (is_proc_myself(p, "exe")) {
-        ret = get_errno(safe_execveat(dirfd, exec_path, argp, envp, flags));
-    } else {
-        ret = get_errno(safe_execveat(dirfd, p, argp, envp, flags));
-    }
-
+    ret = get_errno(safe_execve("/proc/self/exe", argp, envp));
     unlock_user(p, pathname, 0);
 
     goto execve_end;
