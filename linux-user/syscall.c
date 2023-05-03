@@ -8398,6 +8398,7 @@ static int do_execveat(CPUArchState *cpu_env, int dirfd,
     abi_ulong addr;
     char **q;
     void *p;
+    struct stat st;
 
     argc = 0;
 
@@ -8452,6 +8453,21 @@ static int do_execveat(CPUArchState *cpu_env, int dirfd,
     argp[3] = (char*)prepend_workdir_if_relative(p);
     if (!argp[3]) {
         ret = -host_to_target_errno(errno);
+        goto execve_end;
+    }
+
+    /*
+     * Check whether executable up front, as running once the qemu process is started these failures
+     * will happen internally there, and only exposed as a non-zero exit code for qemu.
+     */
+    ret = get_errno(stat(argp[3], &st));
+    if (is_error(ret)) {
+        ret = -host_to_target_errno(errno);
+        goto execve_end;
+    }
+
+    if ((st.st_mode & S_IFDIR) || !(st.st_mode & (S_IXUSR|S_IXGRP|S_IXOTH))) {
+        ret = TARGET_EACCES;
         goto execve_end;
     }
 
